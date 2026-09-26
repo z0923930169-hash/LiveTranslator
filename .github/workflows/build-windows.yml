@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build Windows Portable
 
 on:
   workflow_dispatch:
@@ -21,22 +21,31 @@ jobs:
       - name: Restore
         run: dotnet restore LiveTranslator.csproj
 
-      - name: Publish true single-file Windows EXE
+      - name: Publish Windows portable folder
         run: >
           dotnet publish LiveTranslator.csproj
           -c Release
           -r win-x64
           --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:PublishSingleFile=false
           -p:DebugType=None
           -p:DebugSymbols=false
           -p:PublishTrimmed=false
           -o publish
 
-      - name: Upload EXE
+      - name: Show runtime files
+        shell: pwsh
+        run: |
+          Write-Host "Published files:"
+          Get-ChildItem -Recurse publish | Select-Object FullName
+          Write-Host "Whisper native candidates:"
+          Get-ChildItem -Recurse publish | Where-Object {
+            $_.Name -match 'whisper|ggml' -or $_.FullName -match 'runtimes'
+          } | Select-Object FullName
+
+      - name: Upload portable app
         uses: actions/upload-artifact@v4
         with:
-          name: LiveTranslator-Windows-x64
-          path: publish/LiveTranslator.exe
+          name: LiveTranslator-LocalAI-Portable
+          path: publish/**
           if-no-files-found: error
