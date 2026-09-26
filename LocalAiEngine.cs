@@ -80,6 +80,26 @@ public sealed class LocalAiEngine : IAsyncDisposable
         return audioQueue.Writer.TryWrite(new AudioJob(pcm16, targetLanguage));
     }
 
+    // Used by CI verification. This intentionally runs the real Whisper
+    // processor with a short synthetic tone, proving that the native runtime
+    // and the downloaded model can both be opened and executed.
+    public async Task VerifySpeechPipelineAsync(CancellationToken ct)
+    {
+        const int sampleRate = 16000;
+        const int seconds = 1;
+        byte[] pcm = new byte[sampleRate * seconds * 2];
+
+        for (int i = 0; i < sampleRate * seconds; i++)
+        {
+            double wave = Math.Sin(2.0 * Math.PI * 440.0 * i / sampleRate);
+            short sample = (short)(wave * 5000);
+            pcm[i * 2] = (byte)(sample & 0xff);
+            pcm[i * 2 + 1] = (byte)((sample >> 8) & 0xff);
+        }
+
+        _ = await RecognizeAsync(pcm, ct);
+    }
+
     private async Task AudioWorkerAsync(CancellationToken ct)
     {
         if (audioQueue == null) return;
