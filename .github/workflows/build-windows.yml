@@ -1,4 +1,4 @@
-name: Build Windows Portable
+name: Build and Verify Windows Portable
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
     branches: [ main ]
 
 jobs:
-  build:
+  build-and-test:
     runs-on: windows-latest
 
     steps:
@@ -33,19 +33,78 @@ jobs:
           -p:PublishTrimmed=false
           -o publish
 
-      - name: Show runtime files
+      - name: Verify required native files exist
         shell: pwsh
         run: |
-          Write-Host "Published files:"
-          Get-ChildItem -Recurse publish | Select-Object FullName
-          Write-Host "Whisper native candidates:"
-          Get-ChildItem -Recurse publish | Where-Object {
-            $_.Name -match 'whisper|ggml' -or $_.FullName -match 'runtimes'
-          } | Select-Object FullName
+          $required = @(
+            "publish\runtimes\win-x64\ggml-base-whisper.dll",
+            "publish\runtimes\win-x64\ggml-cpu-whisper.dll",
+            "publish\runtimes\win-x64\ggml-whisper.dll",
+            "publish\runtimes\win-x64\whisper.dll",
+            "publish\runtimes\win-x64\native\avx2\ggml-base.dll",
+            "publish\runtimes\win-x64\native\avx2\ggml.dll",
+            "publish\runtimes\win-x64\native\avx2\ggml-cpu.dll",
+            "publish\runtimes\win-x64\native\avx2\llama.dll"
+          )
 
-      - name: Upload portable app
+          foreach ($file in $required) {
+            if (-not (Test-Path $file)) {
+              throw "Required native file missing: $file"
+            }
+            Write-Host "FOUND $file"
+          }
+
+      - name: Run native DLL smoke test
+        shell: pwsh
+        run: |
+          Push-Location publish
+          & ".\LiveTranslator.exe" --smoke-test
+          $code = $LASTEXITCODE
+          Get-Content ".\smoke-report.txt"
+          Pop-Location
+
+          if ($code -ne 0) {
+            throw "Native smoke test failed with exit code $code"
+          }
+
+      - name: Run WinForms UI smoke test
+        shell: pwsh
+        run: |
+          Push-Location publish
+          & ".\LiveTranslator.exe" --ui-smoke-test
+          $code = $LASTEXITCODE
+          Get-Content ".\ui-smoke-report.txt"
+          Pop-Location
+
+          if ($code -ne 0) {
+            throw "UI smoke test failed with exit code $code"
+          }
+
+      - name: Verify model download URLs without downloading models
+        shell: pwsh
+        run: |
+          $urls = @(
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true",
+            "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true"
+          )
+
+          foreach ($url in $urls) {
+            Write-Host "Checking $url"
+            curl.exe -L --fail --silent --show-error --head $url | Select-Object -Last 20
+            if ($LASTEXITCODE -ne 0) {
+              throw "Model URL check failed: $url"
+            }
+          }
+
+      - name: Remove smoke-test reports from release folder
+        shell: pwsh
+        run: |
+          Remove-Item publish\smoke-report.txt -ErrorAction SilentlyContinue
+          Remove-Item publish\ui-smoke-report.txt -ErrorAction SilentlyContinue
+
+      - name: Upload only after all tests pass
         uses: actions/upload-artifact@v4
         with:
-          name: LiveTranslator-LocalAI-Portable
+          name: LiveTranslator-Verified-LocalAI-Portable
           path: publish/**
           if-no-files-found: error
