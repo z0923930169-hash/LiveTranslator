@@ -5,21 +5,31 @@ namespace LiveTranslator;
 public sealed class SystemAudioCapture : IDisposable
 {
     private WasapiLoopbackCapture? capture;
-    private const int TargetRate = 24000;
+    private readonly List<short> pending = new();
+    private readonly object sync = new();
 
-    public event Action<byte[]>? Pcm24kMono16;
+    private const int TargetRate = 16000;
+    private const int ChunkSeconds = 4;
+    private const int ChunkSamples = TargetRate * ChunkSeconds;
+
+    public event Action<byte[]>? Pcm16Chunk;
     public event Action<string>? Status;
     public event Action<string>? Error;
 
     public void Start()
     {
         Stop();
+
+        lock (sync) pending.Clear();
+
         capture = new WasapiLoopbackCapture();
         Status?.Invoke($"系統音訊：{capture.WaveFormat.SampleRate} Hz / {capture.WaveFormat.Channels} ch");
+
         capture.DataAvailable += OnDataAvailable;
         capture.RecordingStopped += (_, e) =>
         {
-            if (e.Exception != null) Error?.Invoke("收音停止：" + e.Exception.Message);
+            if (e.Exception != null)
+                Error?.Invoke("收音停止：" + e.Exception.Message);
         };
         capture.StartRecording();
     }
@@ -29,14 +39,35 @@ public sealed class SystemAudioCapture : IDisposable
         try
         {
             if (capture == null || e.BytesRecorded <= 0) return;
+
             var src = capture.WaveFormat;
             float[] mono = ToMonoFloat(e.Buffer, e.BytesRecorded, src);
             short[] resampled = LinearResample(mono, src.SampleRate, TargetRate);
-            byte[] pcm = new byte[resampled.Length * 2];
-            Buffer.BlockCopy(resampled, 0, pcm, 0, pcm.Length);
-            Pcm24kMono16?.Invoke(pcm);
+
+            List<byte[]> ready = new();
+
+            lock (sync)
+            {
+                pending.AddRange(resampled);
+
+                while (pending.Count >= ChunkSamples)
+                {
+                    short[] chunk = pending.GetRange(0, ChunkSamples).ToArray();
+                    pending.RemoveRange(0, ChunkSamples);
+
+                    byte[] pcm = new byte[chunk.Length * 2];
+                    Buffer.BlockCopy(chunk, 0, pcm, 0, pcm.Length);
+                    ready.Add(pcm);
+                }
+            }
+
+            foreach (var pcm in ready)
+                Pcm16Chunk?.Invoke(pcm);
         }
-        catch (Exception ex) { Error?.Invoke("音訊轉換錯誤：" + ex.Message); }
+        catch (Exception ex)
+        {
+            Error?.Invoke("音訊處理錯誤：" + ex.Message);
+        }
     }
 
     private static float[] ToMonoFloat(byte[] data, int length, WaveFormat wf)
@@ -57,6 +88,7 @@ public sealed class SystemAudioCapture : IDisposable
         {
             int frames = length / (4 * channels);
             float[] mono = new float[frames];
+
             for (int i = 0; i < frames; i++)
             {
                 double sum = 0;
@@ -71,6 +103,7 @@ public sealed class SystemAudioCapture : IDisposable
         {
             int frames = length / (2 * channels);
             float[] mono = new float[frames];
+
             for (int i = 0; i < frames; i++)
             {
                 double sum = 0;
@@ -88,6 +121,7 @@ public sealed class SystemAudioCapture : IDisposable
     private static short[] LinearResample(float[] input, int inputRate, int outputRate)
     {
         if (input.Length == 0) return Array.Empty<short>();
+
         if (inputRate == outputRate)
             return input.Select(FloatToShort).ToArray();
 
@@ -101,9 +135,14 @@ public sealed class SystemAudioCapture : IDisposable
             int i0 = Math.Min((int)Math.Floor(srcPos), input.Length - 1);
             int i1 = Math.Min(i0 + 1, input.Length - 1);
             double frac = srcPos - i0;
-            float sample = (float)(input[i0] * (1.0 - frac) + input[i1] * frac);
+
+            float sample = (float)(
+                input[i0] * (1.0 - frac) +
+                input[i1] * frac);
+
             output[i] = FloatToShort(sample);
         }
+
         return output;
     }
 
@@ -116,6 +155,7 @@ public sealed class SystemAudioCapture : IDisposable
     public void Stop()
     {
         if (capture == null) return;
+
         try { capture.StopRecording(); } catch { }
         capture.Dispose();
         capture = null;
