@@ -58,9 +58,16 @@ jobs:
         shell: pwsh
         run: |
           Push-Location publish
-          & ".\LiveTranslator.exe" --smoke-test
-          $code = $LASTEXITCODE
-          Get-Content ".\smoke-report.txt"
+          $process = Start-Process -FilePath ".\LiveTranslator.exe" -ArgumentList "--smoke-test" -Wait -PassThru
+          $code = $process.ExitCode
+
+          if (Test-Path ".\smoke-report.txt") {
+            Get-Content ".\smoke-report.txt"
+          } else {
+            Pop-Location
+            throw "Smoke test produced no report. Exit code: $code"
+          }
+
           Pop-Location
 
           if ($code -ne 0) {
@@ -71,9 +78,16 @@ jobs:
         shell: pwsh
         run: |
           Push-Location publish
-          & ".\LiveTranslator.exe" --ui-smoke-test
-          $code = $LASTEXITCODE
-          Get-Content ".\ui-smoke-report.txt"
+          $process = Start-Process -FilePath ".\LiveTranslator.exe" -ArgumentList "--ui-smoke-test" -Wait -PassThru
+          $code = $process.ExitCode
+
+          if (Test-Path ".\ui-smoke-report.txt") {
+            Get-Content ".\ui-smoke-report.txt"
+          } else {
+            Pop-Location
+            throw "UI smoke test produced no report. Exit code: $code"
+          }
+
           Pop-Location
 
           if ($code -ne 0) {
