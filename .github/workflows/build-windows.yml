@@ -21,20 +21,22 @@ jobs:
       - name: Restore
         run: dotnet restore LiveTranslator.csproj
 
-      - name: Publish single-file Windows EXE
+      - name: Publish true single-file Windows EXE
         run: >
           dotnet publish LiveTranslator.csproj
           -c Release
           -r win-x64
           --self-contained true
           -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
           -p:DebugType=None
           -p:DebugSymbols=false
+          -p:PublishTrimmed=false
           -o publish
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
           name: LiveTranslator-Windows-x64
-          path: publish/**
+          path: publish/LiveTranslator.exe
           if-no-files-found: error
