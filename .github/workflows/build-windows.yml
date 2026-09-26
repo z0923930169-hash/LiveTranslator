@@ -139,6 +139,25 @@ jobs:
             throw "Full engine test failed with exit code $code"
           }
 
+      - name: Prune files not needed on Windows x64
+        shell: pwsh
+        run: |
+          Remove-Item publish\runtimes\win-x86 -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item publish\runtimes\win-arm64 -Recurse -Force -ErrorAction SilentlyContinue
+
+          $satelliteFolders = @(
+            "cs", "de", "es", "fr", "it", "ja", "ko",
+            "pl", "pt-BR", "ru", "tr", "zh-Hans", "zh-Hant"
+          )
+
+          foreach ($folder in $satelliteFolders) {
+            Remove-Item ("publish\" + $folder) -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+          Write-Host "Final portable folder size:"
+          $bytes = (Get-ChildItem publish -Recurse -File | Measure-Object Length -Sum).Sum
+          Write-Host ([math]::Round($bytes / 1MB, 1)) "MB"
+
       - name: Remove smoke-test reports from release folder
         shell: pwsh
         run: |
