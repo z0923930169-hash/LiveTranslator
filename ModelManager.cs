@@ -11,11 +11,21 @@ public sealed class ModelManager
 {
     private static readonly HttpClient Http = CreateClient();
 
-    public string ModelDirectory { get; } =
-        Path.Combine(
+    public string ModelDirectory { get; } = ResolveModelDirectory();
+
+    private static string ResolveModelDirectory()
+    {
+        string? overrideDirectory =
+            Environment.GetEnvironmentVariable("LIVETRANSLATOR_MODEL_DIR");
+
+        if (!string.IsNullOrWhiteSpace(overrideDirectory))
+            return Path.GetFullPath(overrideDirectory);
+
+        return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "LiveTranslator",
             "models");
+    }
 
     public string WhisperPath =>
         Path.Combine(ModelDirectory, "ggml-base.bin");
