@@ -1,60 +1,74 @@
-using System.Security.Cryptography;
+using System.Diagnostics;
 using System.Text;
 
 namespace LiveTranslator;
 
 public sealed class MainForm : Form
 {
-    private readonly TextBox apiKey = new();
     private readonly ComboBox targetLanguage = new();
     private readonly Button start = new();
     private readonly Button stop = new();
     private readonly Button toggleOverlay = new();
     private readonly Button translateFile = new();
+    private readonly Button openModels = new();
     private readonly Label status = new();
+    private readonly Label modelInfo = new();
+    private readonly ProgressBar progressBar = new();
     private readonly TextBox sourceText = new();
     private readonly TextBox translatedText = new();
-    private readonly CheckBox rememberKey = new();
     private readonly NumericUpDown fontSize = new();
     private readonly NumericUpDown opacity = new();
 
     private readonly SubtitleOverlay overlay = new();
+    private readonly ModelManager models = new();
+
+    private LocalAiEngine? engine;
     private SystemAudioCapture? capture;
-    private OpenAIRealtimeTranslationClient? client;
-    private CancellationTokenSource? cts;
+    private CancellationTokenSource operationCts = new();
+    private bool isRunning;
 
-    private string sourceBuffer = "";
-    private string translationBuffer = "";
-
-    private static readonly Dictionary<string, string> Languages = new()
+    private static readonly Dictionary<string, string> TargetDescriptions = new()
     {
-        ["繁體中文"] = "zh-TW",
-        ["簡體中文"] = "zh-CN",
-        ["English"] = "en",
-        ["日本語"] = "ja",
-        ["한국어"] = "ko",
-        ["Français"] = "fr",
-        ["Deutsch"] = "de",
-        ["Español"] = "es",
-        ["Português"] = "pt",
-        ["Italiano"] = "it",
-        ["Русский"] = "ru",
-        ["ไทย"] = "th",
-        ["Tiếng Việt"] = "vi",
-        ["Bahasa Indonesia"] = "id"
+        ["繁體中文"] = "Traditional Chinese (Taiwan)",
+        ["簡體中文"] = "Simplified Chinese",
+        ["English"] = "English",
+        ["日本語"] = "Japanese",
+        ["한국어"] = "Korean",
+        ["Français"] = "French",
+        ["Deutsch"] = "German",
+        ["Español"] = "Spanish",
+        ["Português"] = "Portuguese",
+        ["Italiano"] = "Italian",
+        ["Русский"] = "Russian",
+        ["ไทย"] = "Thai",
+        ["Tiếng Việt"] = "Vietnamese",
+        ["Bahasa Indonesia"] = "Indonesian"
     };
 
     public MainForm()
     {
-        Text = "LiveTranslator - OpenAI 即時翻譯";
-        Width = 900;
-        Height = 720;
-        MinimumSize = new Size(780, 640);
+        Text = "LiveTranslator - 免費本機 AI 即時翻譯";
+        Width = 920;
+        Height = 760;
+        MinimumSize = new Size(800, 650);
         StartPosition = FormStartPosition.CenterScreen;
 
         BuildUi();
-        LoadRememberedKey();
-        FormClosing += async (_, __) => await StopAsync();
+        UpdateModelInfo();
+
+        FormClosing += async (_, __) =>
+        {
+            try { operationCts.Cancel(); } catch { }
+            try { capture?.Stop(); } catch { }
+            capture?.Dispose();
+
+            if (engine != null)
+            {
+                try { await engine.DisposeAsync(); } catch { }
+            }
+
+            operationCts.Dispose();
+        };
     }
 
     private void BuildUi()
@@ -62,11 +76,13 @@ public sealed class MainForm : Form
         var root = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
-            RowCount = 7,
+            RowCount = 8,
             ColumnCount = 1,
             Padding = new Padding(18),
             AutoScroll = true
         };
+
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
@@ -83,64 +99,59 @@ public sealed class MainForm : Form
             AutoSize = true
         });
 
-        var settings = new TableLayoutPanel
+        var subtitle = new Label
         {
+            Text = "免費本機 AI：電腦聲音 → Whisper 語音辨識 → Qwen3 翻譯 → 即時字幕",
             AutoSize = true,
-            Dock = DockStyle.Top,
-            ColumnCount = 4,
-            Padding = new Padding(0, 10, 0, 6)
+            ForeColor = Color.DimGray,
+            Padding = new Padding(0, 4, 0, 8)
         };
-        settings.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        settings.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        settings.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-        settings.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        root.Controls.Add(subtitle);
 
-        settings.Controls.Add(new Label
+        var settings = new FlowLayoutPanel
         {
-            Text = "OpenAI API Key：",
+            Dock = DockStyle.Top,
             AutoSize = true,
-            Anchor = AnchorStyles.Left
-        }, 0, 0);
-
-        apiKey.UseSystemPasswordChar = true;
-        apiKey.Dock = DockStyle.Fill;
-        settings.Controls.Add(apiKey, 1, 0);
-
-        rememberKey.Text = "記住金鑰";
-        rememberKey.AutoSize = true;
-        settings.Controls.Add(rememberKey, 2, 0);
-
-        var showKey = new CheckBox { Text = "顯示", AutoSize = true };
-        showKey.CheckedChanged += (_, __) => apiKey.UseSystemPasswordChar = !showKey.Checked;
-        settings.Controls.Add(showKey, 3, 0);
+            WrapContents = true,
+            Padding = new Padding(0, 5, 0, 5)
+        };
 
         settings.Controls.Add(new Label
         {
             Text = "翻譯成：",
             AutoSize = true,
-            Anchor = AnchorStyles.Left
-        }, 0, 1);
+            Margin = new Padding(0, 7, 5, 0)
+        });
 
         targetLanguage.DropDownStyle = ComboBoxStyle.DropDownList;
-        targetLanguage.DataSource = Languages.Keys.ToList();
+        targetLanguage.Width = 180;
+        targetLanguage.DataSource = TargetDescriptions.Keys.ToList();
         targetLanguage.SelectedItem = "繁體中文";
-        settings.Controls.Add(targetLanguage, 1, 1);
+        settings.Controls.Add(targetLanguage);
 
-        var hint = new Label
+        modelInfo.AutoSize = true;
+        modelInfo.Margin = new Padding(20, 7, 10, 0);
+        settings.Controls.Add(modelInfo);
+
+        openModels.Text = "開啟模型資料夾";
+        openModels.AutoSize = true;
+        openModels.Click += (_, __) =>
         {
-            Text = "即時模式會把 Windows 系統播放聲音送到 OpenAI Realtime Translation。",
-            AutoSize = true,
-            ForeColor = Color.DimGray,
-            Anchor = AnchorStyles.Left
+            Directory.CreateDirectory(models.ModelDirectory);
+            Process.Start(new ProcessStartInfo("explorer.exe", models.ModelDirectory)
+            {
+                UseShellExecute = true
+            });
         };
-        settings.Controls.Add(hint, 2, 1);
-        settings.SetColumnSpan(hint, 2);
+        settings.Controls.Add(openModels);
+
         root.Controls.Add(settings);
 
         var buttons = new FlowLayoutPanel
         {
             Dock = DockStyle.Top,
             AutoSize = true,
+            WrapContents = true,
             Padding = new Padding(0, 4, 0, 4)
         };
 
@@ -151,17 +162,45 @@ public sealed class MainForm : Form
         stop.Enabled = false;
 
         start.Click += async (_, __) => await StartAsync();
-        stop.Click += async (_, __) => await StopAsync();
+        stop.Click += (_, __) => StopLive();
         toggleOverlay.Click += (_, __) =>
         {
             if (overlay.Visible) overlay.Hide(); else overlay.Show();
         };
         translateFile.Click += async (_, __) => await TranslateFileAsync();
 
-        buttons.Controls.AddRange(new Control[] { start, stop, toggleOverlay, translateFile });
+        buttons.Controls.AddRange(new Control[]
+        {
+            start, stop, toggleOverlay, translateFile
+        });
+
         root.Controls.Add(buttons);
 
-        var sourceGroup = new GroupBox { Text = "原文", Dock = DockStyle.Fill };
+        var progressPanel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 1
+        };
+        progressBar.Dock = DockStyle.Top;
+        progressBar.Height = 18;
+        progressBar.Minimum = 0;
+        progressBar.Maximum = 100;
+        progressPanel.Controls.Add(progressBar);
+
+        status.Text = "狀態：待命";
+        status.AutoSize = true;
+        status.Padding = new Padding(0, 5, 0, 4);
+        progressPanel.Controls.Add(status);
+
+        root.Controls.Add(progressPanel);
+
+        var sourceGroup = new GroupBox
+        {
+            Text = "語音辨識原文",
+            Dock = DockStyle.Fill
+        };
+
         sourceText.Multiline = true;
         sourceText.ReadOnly = true;
         sourceText.ScrollBars = ScrollBars.Vertical;
@@ -170,7 +209,12 @@ public sealed class MainForm : Form
         sourceGroup.Controls.Add(sourceText);
         root.Controls.Add(sourceGroup);
 
-        var transGroup = new GroupBox { Text = "翻譯", Dock = DockStyle.Fill };
+        var transGroup = new GroupBox
+        {
+            Text = "翻譯",
+            Dock = DockStyle.Fill
+        };
+
         translatedText.Multiline = true;
         translatedText.ReadOnly = true;
         translatedText.ScrollBars = ScrollBars.Vertical;
@@ -179,7 +223,12 @@ public sealed class MainForm : Form
         transGroup.Controls.Add(translatedText);
         root.Controls.Add(transGroup);
 
-        var subtitleSettings = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true };
+        var subtitleSettings = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true
+        };
+
         subtitleSettings.Controls.Add(new Label
         {
             Text = "字幕大小",
@@ -190,7 +239,8 @@ public sealed class MainForm : Form
         fontSize.Minimum = 16;
         fontSize.Maximum = 52;
         fontSize.Value = 28;
-        fontSize.ValueChanged += (_, __) => overlay.SetFontSize((float)fontSize.Value);
+        fontSize.ValueChanged += (_, __) =>
+            overlay.SetFontSize((float)fontSize.Value);
         subtitleSettings.Controls.Add(fontSize);
 
         subtitleSettings.Controls.Add(new Label
@@ -203,214 +253,272 @@ public sealed class MainForm : Form
         opacity.Minimum = 30;
         opacity.Maximum = 100;
         opacity.Value = 82;
-        opacity.ValueChanged += (_, __) => overlay.SetOpacityPercent((int)opacity.Value);
+        opacity.ValueChanged += (_, __) =>
+            overlay.SetOpacityPercent((int)opacity.Value);
         subtitleSettings.Controls.Add(opacity);
+
         root.Controls.Add(subtitleSettings);
 
-        status.Text = "狀態：待命";
-        status.AutoSize = true;
-        status.Padding = new Padding(0, 8, 0, 0);
-        root.Controls.Add(status);
+        root.Controls.Add(new Label
+        {
+            Text =
+                "第一次使用會下載約 1.4 GB 的本機模型。下載完成後，不需 API Key，" +
+                "翻譯時也不會把你的遊戲聲音傳給 Google、OpenAI 或其他翻譯網站。",
+            AutoSize = true,
+            MaximumSize = new Size(820, 0),
+            ForeColor = Color.DimGray,
+            Padding = new Padding(0, 5, 0, 0)
+        });
     }
 
     private async Task StartAsync()
     {
+        if (isRunning) return;
+
         try
         {
-            string key = apiKey.Text.Trim();
-            if (string.IsNullOrWhiteSpace(key))
-            {
-                MessageBox.Show("請先輸入 OpenAI API Key。", "需要 API Key",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
-
-            if (rememberKey.Checked) SaveKey(key); else DeleteSavedKey();
-
             start.Enabled = false;
-            stop.Enabled = true;
-            sourceBuffer = "";
-            translationBuffer = "";
+            translateFile.Enabled = false;
+            targetLanguage.Enabled = false;
+
+            await EnsureEngineReadyAsync(operationCts.Token);
+
+            string targetLabel =
+                targetLanguage.SelectedItem?.ToString() ?? "繁體中文";
+            string target = TargetDescriptions[targetLabel];
+
             sourceText.Clear();
             translatedText.Clear();
 
-            cts = new CancellationTokenSource();
-
-            client = new OpenAIRealtimeTranslationClient();
-            client.Status += SetStatus;
-            client.Error += ShowError;
-            client.SourceDelta += AppendSource;
-            client.TranslationDelta += AppendTranslation;
-
-            string label = targetLanguage.SelectedItem?.ToString() ?? "繁體中文";
-            string lang = Languages[label];
-
-            await client.ConnectAsync(key, lang, cts.Token);
-
+            capture?.Dispose();
             capture = new SystemAudioCapture();
             capture.Status += SetStatus;
             capture.Error += ShowError;
-            capture.Pcm24kMono16 += async pcm =>
+            capture.Pcm16Chunk += pcm =>
             {
-                try
-                {
-                    if (client != null && cts != null && !cts.IsCancellationRequested)
-                        await client.SendPcm16Async(pcm, cts.Token);
-                }
-                catch (OperationCanceledException) { }
-                catch (Exception ex) { ShowError(ex.Message); }
+                if (engine == null) return;
+
+                bool queued = engine.QueueAudio(pcm, target);
+                if (!queued)
+                    SetStatus("本機 AI 尚未準備完成。");
             };
+
             capture.Start();
 
+            isRunning = true;
+            stop.Enabled = true;
             overlay.Show();
-            SetStatus("翻譯中：正在收取電腦播放的聲音。");
+            SetStatus("翻譯中：每約 4 秒處理一段電腦聲音。");
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus("已取消。");
         }
         catch (Exception ex)
         {
             ShowError(ex.Message);
-            await StopAsync();
+            targetLanguage.Enabled = true;
+        }
+        finally
+        {
+            if (!isRunning)
+            {
+                start.Enabled = true;
+                translateFile.Enabled = true;
+            }
         }
     }
 
-    private async Task StopAsync()
+    private void StopLive()
     {
-        stop.Enabled = false;
-
         try { capture?.Stop(); } catch { }
         capture?.Dispose();
         capture = null;
 
-        if (client != null)
-        {
-            try { await client.DisposeAsync(); } catch { }
-            client = null;
-        }
-
-        try { cts?.Cancel(); } catch { }
-        cts?.Dispose();
-        cts = null;
-
+        isRunning = false;
         start.Enabled = true;
-        SetStatus("已停止。");
+        stop.Enabled = false;
+        translateFile.Enabled = true;
+        targetLanguage.Enabled = true;
+        SetStatus("已停止收音。本機模型仍保留在記憶體中，可快速再次開始。");
     }
 
-    private void AppendSource(string delta)
+    private async Task EnsureEngineReadyAsync(CancellationToken ct)
     {
-        if (InvokeRequired) { BeginInvoke(() => AppendSource(delta)); return; }
-        sourceBuffer += delta;
-        if (sourceBuffer.Length > 6000) sourceBuffer = sourceBuffer[^6000..];
-        sourceText.Text = sourceBuffer;
-        sourceText.SelectionStart = sourceText.TextLength;
-        sourceText.ScrollToCaret();
-    }
+        if (engine != null) return;
 
-    private void AppendTranslation(string delta)
-    {
-        if (InvokeRequired) { BeginInvoke(() => AppendTranslation(delta)); return; }
-        translationBuffer += delta;
-        if (translationBuffer.Length > 6000) translationBuffer = translationBuffer[^6000..];
-        translatedText.Text = translationBuffer;
-        translatedText.SelectionStart = translatedText.TextLength;
-        translatedText.ScrollToCaret();
-        overlay.SetSubtitle(GetRecentSubtitle(translationBuffer));
-    }
+        progressBar.Value = 0;
 
-    private static string GetRecentSubtitle(string text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return "…";
-        text = text.Trim();
-
-        int lastBreak = Math.Max(text.LastIndexOf('\n'), Math.Max(text.LastIndexOf('。'), text.LastIndexOf('！')));
-        if (lastBreak >= 0 && lastBreak < text.Length - 1)
+        var downloadProgress = new Progress<ModelDownloadProgress>(p =>
         {
-            string tail = text[(lastBreak + 1)..].Trim();
-            if (tail.Length >= 8) return tail.Length <= 180 ? tail : tail[^180..];
+            progressBar.Value = p.Percent;
+
+            double mb = p.Received / 1024d / 1024d;
+            string totalText = p.Total is > 0
+                ? $" / {p.Total.Value / 1024d / 1024d:0} MB"
+                : "";
+
+            SetStatus($"下載 {p.Name}：{mb:0} MB{totalText} ({p.Percent}%)");
+        });
+
+        if (!models.ModelsReady)
+            SetStatus("第一次使用：正在下載本機 AI 模型…");
+
+        await models.EnsureModelsAsync(downloadProgress, ct);
+        progressBar.Value = 100;
+        UpdateModelInfo();
+
+        engine = new LocalAiEngine(models);
+        engine.Status += SetStatus;
+        engine.Error += ShowError;
+        engine.Recognized += AppendSource;
+        engine.TranslationReady += AppendTranslation;
+
+        await engine.InitializeAsync(ct);
+        progressBar.Value = 0;
+    }
+
+    private void AppendSource(string text)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => AppendSource(text));
+            return;
         }
 
-        return text.Length <= 180 ? text : text[^180..];
+        AppendLine(sourceText, text);
+    }
+
+    private void AppendTranslation(string text)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => AppendTranslation(text));
+            return;
+        }
+
+        AppendLine(translatedText, text);
+        overlay.SetSubtitle(text);
+    }
+
+    private static void AppendLine(TextBox box, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return;
+
+        if (box.TextLength > 12000)
+            box.Text = box.Text[^8000..];
+
+        if (box.TextLength > 0)
+            box.AppendText(Environment.NewLine);
+
+        box.AppendText(text.Trim());
+        box.SelectionStart = box.TextLength;
+        box.ScrollToCaret();
+    }
+
+    private async Task TranslateFileAsync()
+    {
+        try
+        {
+            if (isRunning)
+                StopLive();
+
+            start.Enabled = false;
+            translateFile.Enabled = false;
+            targetLanguage.Enabled = false;
+
+            await EnsureEngineReadyAsync(operationCts.Token);
+            if (engine == null) return;
+
+            using var dlg = new OpenFileDialog
+            {
+                Filter =
+                    "字幕或文字|*.srt;*.vtt;*.txt|" +
+                    "SRT|*.srt|VTT|*.vtt|文字|*.txt"
+            };
+
+            if (dlg.ShowDialog(this) != DialogResult.OK)
+                return;
+
+            string targetLabel =
+                targetLanguage.SelectedItem?.ToString() ?? "繁體中文";
+            string target = TargetDescriptions[targetLabel];
+
+            string input = await File.ReadAllTextAsync(
+                dlg.FileName, Encoding.UTF8, operationCts.Token);
+
+            var translator = new LocalSubtitleTranslator(engine);
+
+            var fileProgress = new Progress<(int Done, int Total)>(p =>
+            {
+                int percent = p.Total > 0 ? p.Done * 100 / p.Total : 0;
+                progressBar.Value = Math.Clamp(percent, 0, 100);
+                SetStatus($"本機翻譯字幕：{p.Done}/{p.Total} ({percent}%)");
+            });
+
+            string output = await translator.TranslateAsync(
+                input, target, fileProgress, operationCts.Token);
+
+            string dir = Path.GetDirectoryName(dlg.FileName)!;
+            string name = Path.GetFileNameWithoutExtension(dlg.FileName);
+            string ext = Path.GetExtension(dlg.FileName);
+            string outPath = Path.Combine(
+                dir, $"{name}.translated{ext}");
+
+            await File.WriteAllTextAsync(
+                outPath, output, new UTF8Encoding(true), operationCts.Token);
+
+            progressBar.Value = 100;
+            SetStatus("字幕翻譯完成：" + outPath);
+
+            MessageBox.Show(
+                $"已輸出：\n{outPath}",
+                "翻譯完成",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Information);
+        }
+        catch (OperationCanceledException)
+        {
+            SetStatus("已取消。");
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex.Message);
+        }
+        finally
+        {
+            start.Enabled = true;
+            translateFile.Enabled = true;
+            targetLanguage.Enabled = true;
+        }
+    }
+
+    private void UpdateModelInfo()
+    {
+        modelInfo.Text = models.ModelsReady
+            ? "本機模型：已下載"
+            : "本機模型：第一次使用時下載約 1.4 GB";
     }
 
     private void SetStatus(string text)
     {
-        if (InvokeRequired) { BeginInvoke(() => SetStatus(text)); return; }
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => SetStatus(text));
+            return;
+        }
+
         status.Text = "狀態：" + text;
     }
 
     private void ShowError(string text)
     {
-        if (InvokeRequired) { BeginInvoke(() => ShowError(text)); return; }
-        status.Text = "狀態：錯誤 - " + text;
-    }
-
-    private async Task TranslateFileAsync()
-    {
-        if (string.IsNullOrWhiteSpace(apiKey.Text))
+        if (InvokeRequired)
         {
-            MessageBox.Show("請先輸入 OpenAI API Key。");
+            BeginInvoke(() => ShowError(text));
             return;
         }
 
-        using var dlg = new OpenFileDialog
-        {
-            Filter = "字幕或文字|*.srt;*.vtt;*.txt|SRT|*.srt|VTT|*.vtt|文字|*.txt"
-        };
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
-
-        try
-        {
-            SetStatus("正在翻譯字幕檔…");
-            string input = await File.ReadAllTextAsync(dlg.FileName, Encoding.UTF8);
-
-            string label = targetLanguage.SelectedItem?.ToString() ?? "繁體中文";
-            var translator = new SubtitleFileTranslator();
-            string output = await translator.TranslateAsync(
-                apiKey.Text.Trim(), input, label, CancellationToken.None);
-
-            string dir = Path.GetDirectoryName(dlg.FileName)!;
-            string name = Path.GetFileNameWithoutExtension(dlg.FileName);
-            string ext = Path.GetExtension(dlg.FileName);
-            string outPath = Path.Combine(dir, $"{name}.translated{ext}");
-
-            await File.WriteAllTextAsync(outPath, output, new UTF8Encoding(true));
-            SetStatus("字幕翻譯完成：" + outPath);
-
-            MessageBox.Show($"已輸出：\n{outPath}", "完成",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
-        }
-        catch (Exception ex) { ShowError(ex.Message); }
-    }
-
-    private string KeyPath =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "LiveTranslator", "apikey.bin");
-
-    private void SaveKey(string key)
-    {
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(KeyPath)!);
-            byte[] raw = Encoding.UTF8.GetBytes(key);
-            byte[] protectedData = ProtectedData.Protect(raw, null, DataProtectionScope.CurrentUser);
-            File.WriteAllBytes(KeyPath, protectedData);
-        }
-        catch { }
-    }
-
-    private void LoadRememberedKey()
-    {
-        try
-        {
-            if (!File.Exists(KeyPath)) return;
-            byte[] protectedData = File.ReadAllBytes(KeyPath);
-            byte[] raw = ProtectedData.Unprotect(protectedData, null, DataProtectionScope.CurrentUser);
-            apiKey.Text = Encoding.UTF8.GetString(raw);
-            rememberKey.Checked = true;
-        }
-        catch { }
-    }
-
-    private void DeleteSavedKey()
-    {
-        try { if (File.Exists(KeyPath)) File.Delete(KeyPath); } catch { }
+        status.Text = "狀態：錯誤 - " + text;
     }
 }
