@@ -39,7 +39,7 @@ public sealed class LocalAiEngine : IAsyncDisposable
         Status?.Invoke("正在載入 Whisper 語音辨識模型…");
         whisperFactory = WhisperFactory.FromPath(models.WhisperPath);
 
-        Status?.Invoke("正在載入 Qwen3 本機翻譯模型…第一次可能要等一下。");
+        Status?.Invoke("正在載入 Qwen2.5 本機翻譯模型…第一次可能要等一下。");
 
         var parameters = new ModelParams(models.TranslationPath)
         {
@@ -179,7 +179,8 @@ public sealed class LocalAiEngine : IAsyncDisposable
                     ? "Use only Traditional Chinese characters and natural Taiwan wording; never output Simplified Chinese. "
                     : "") +
                 "Return only the translation with no explanation or label. " +
-                "/no_think\n\n" + sourceText.Trim();
+                "\n\nSOURCE TEXT:\n" + sourceText.Trim() +
+                "\n\nTRANSLATION:";
 
             var inference = new InferenceParams
             {
