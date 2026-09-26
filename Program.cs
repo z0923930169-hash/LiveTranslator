@@ -19,6 +19,9 @@ internal static class Program
         if (args.Contains("--ui-smoke-test", StringComparer.OrdinalIgnoreCase))
             return SmokeTests.RunUiSmoke();
 
+        if (args.Contains("--engine-smoke-test", StringComparer.OrdinalIgnoreCase))
+            return SmokeTests.RunEngineSmokeAsync().GetAwaiter().GetResult();
+
         Application.Run(new MainForm());
         return 0;
     }
