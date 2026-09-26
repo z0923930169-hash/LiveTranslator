@@ -170,9 +170,15 @@ public sealed class LocalAiEngine : IAsyncDisposable
         try
         {
             string prompt =
-                $"Translate the following text into {targetLanguage}. " +
-                "Keep proper nouns, game character names, numbers, punctuation, and subtitle tags intact. " +
-                "Use natural language suitable for subtitles. Return only the translated text. " +
+                $"Translate ALL translatable content into {targetLanguage}. " +
+                "Do not leave words or sentences in the source language unless they are proper nouns, brands, " +
+                "character names, or terms that truly must remain unchanged. " +
+                "Keep names, numbers, punctuation, and subtitle tags intact. " +
+                "Use concise, natural wording suitable for game subtitles. " +
+                (targetLanguage.Contains("Traditional Chinese", StringComparison.OrdinalIgnoreCase)
+                    ? "Use only Traditional Chinese characters and natural Taiwan wording; never output Simplified Chinese. "
+                    : "") +
+                "Return only the translation with no explanation or label. " +
                 "/no_think\n\n" + sourceText.Trim();
 
             var inference = new InferenceParams
@@ -189,7 +195,16 @@ public sealed class LocalAiEngine : IAsyncDisposable
             await foreach (var piece in executor.InferAsync(prompt, inference, ct))
                 output.Append(piece);
 
-            return CleanTranslation(output.ToString());
+            string cleaned = CleanTranslation(output.ToString());
+
+            if (targetLanguage.Contains(
+                "Traditional Chinese",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                cleaned = ChineseScriptConverter.ToTraditionalTaiwan(cleaned);
+            }
+
+            return cleaned;
         }
         finally
         {
