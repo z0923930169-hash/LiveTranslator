@@ -107,6 +107,101 @@ public static class SmokeTests
         }
     }
 
+    public static async Task<int> RunEngineSmokeAsync()
+    {
+        string reportPath =
+            Path.Combine(AppContext.BaseDirectory, "engine-smoke-report.txt");
+
+        var report = new StringBuilder();
+        LocalAiEngine? engine = null;
+
+        try
+        {
+            NativeRuntimeBootstrap.Configure();
+
+            report.AppendLine("LiveTranslator full local-engine smoke test");
+            report.AppendLine("Model directory: " +
+                (Environment.GetEnvironmentVariable("LIVETRANSLATOR_MODEL_DIR") ?? "(default)"));
+
+            var models = new ModelManager();
+            int lastPercent = -10;
+
+            var progress = new Progress<ModelDownloadProgress>(p =>
+            {
+                if (p.Percent >= lastPercent + 10 || p.Percent == 100)
+                {
+                    lastPercent = p.Percent;
+                    report.AppendLine(
+                        $"DOWNLOAD {p.Name}: {p.Percent}% ({p.Received} / {p.Total?.ToString() ?? "?"})");
+                }
+            });
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(20));
+
+            report.AppendLine("STEP: Ensure models");
+            await models.EnsureModelsAsync(progress, cts.Token);
+
+            if (!File.Exists(models.WhisperPath))
+                throw new FileNotFoundException("Whisper model missing after download.", models.WhisperPath);
+
+            if (!File.Exists(models.TranslationPath))
+                throw new FileNotFoundException("Qwen model missing after download.", models.TranslationPath);
+
+            report.AppendLine($"Whisper model bytes: {new FileInfo(models.WhisperPath).Length}");
+            report.AppendLine($"Qwen model bytes: {new FileInfo(models.TranslationPath).Length}");
+
+            engine = new LocalAiEngine(models);
+            engine.Status += x => report.AppendLine("STATUS: " + x);
+            engine.Error += x => report.AppendLine("ENGINE ERROR EVENT: " + x);
+
+            report.AppendLine("STEP: Initialize Whisper + Qwen");
+            await engine.InitializeAsync(cts.Token);
+
+            report.AppendLine("STEP: Run real Whisper processor");
+            await engine.VerifySpeechPipelineAsync(cts.Token);
+            report.AppendLine("Whisper processing completed.");
+
+            report.AppendLine("STEP: Run real Qwen translation");
+            string translated = await engine.TranslateTextAsync(
+                "Hello, world! This is a local translation test.",
+                "Traditional Chinese (Taiwan)",
+                cts.Token);
+
+            report.AppendLine("Translation output: " + translated);
+
+            if (string.IsNullOrWhiteSpace(translated))
+                throw new InvalidOperationException("Qwen returned an empty translation.");
+
+            if (string.Equals(
+                translated.Trim(),
+                "Hello, world! This is a local translation test.",
+                StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException("Qwen returned the source text unchanged.");
+            }
+
+            report.AppendLine();
+            report.AppendLine("RESULT: PASS");
+            File.WriteAllText(reportPath, report.ToString(), Encoding.UTF8);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            report.AppendLine();
+            report.AppendLine("RESULT: FAIL");
+            report.AppendLine(ex.ToString());
+            File.WriteAllText(reportPath, report.ToString(), Encoding.UTF8);
+            return 5;
+        }
+        finally
+        {
+            if (engine != null)
+            {
+                try { await engine.DisposeAsync(); } catch { }
+            }
+        }
+    }
+
     [STAThread]
     public static int RunUiSmoke()
     {
