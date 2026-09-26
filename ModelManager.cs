@@ -31,13 +31,16 @@ public sealed class ModelManager
         Path.Combine(ModelDirectory, "ggml-base.bin");
 
     public string TranslationPath =>
+        Path.Combine(ModelDirectory, "qwen2.5-1.5b-instruct-q4_k_m.gguf");
+
+    private string LegacyQwen3Path =>
         Path.Combine(ModelDirectory, "Qwen3-1.7B-Q4_K_M.gguf");
 
     private const string WhisperUrl =
         "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true";
 
     private const string TranslationUrl =
-        "https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf?download=true";
+        "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf?download=true";
 
     public bool ModelsReady =>
         File.Exists(WhisperPath) &&
@@ -61,8 +64,17 @@ public sealed class ModelManager
 
         if (!File.Exists(TranslationPath))
         {
+            // Old builds used Qwen3 1.7B. Remove it before downloading the
+            // replacement so users do not temporarily need space for both.
+            try
+            {
+                if (File.Exists(LegacyQwen3Path))
+                    File.Delete(LegacyQwen3Path);
+            }
+            catch { }
+
             await DownloadAsync(
-                "Qwen3 1.7B 本機翻譯模型",
+                "Qwen2.5 1.5B 本機翻譯模型",
                 TranslationUrl,
                 TranslationPath,
                 progress,
