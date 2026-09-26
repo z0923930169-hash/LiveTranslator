@@ -8,6 +8,8 @@ on:
 jobs:
   build-and-test:
     runs-on: windows-latest
+    env:
+      LIVETRANSLATOR_MODEL_DIR: ${{ github.workspace }}\.ci-models
 
     steps:
       - name: Checkout
@@ -110,11 +112,39 @@ jobs:
             }
           }
 
+      - name: Cache cloud-test models
+        uses: actions/cache@v4
+        with:
+          path: .ci-models
+          key: livetranslator-local-models-v1
+
+      - name: Run full Whisper + Qwen model test
+        shell: pwsh
+        timeout-minutes: 25
+        run: |
+          Push-Location publish
+          $process = Start-Process -FilePath ".\LiveTranslator.exe" -ArgumentList "--engine-smoke-test" -Wait -PassThru
+          $code = $process.ExitCode
+
+          if (Test-Path ".\engine-smoke-report.txt") {
+            Get-Content ".\engine-smoke-report.txt"
+          } else {
+            Pop-Location
+            throw "Full engine test produced no report. Exit code: $code"
+          }
+
+          Pop-Location
+
+          if ($code -ne 0) {
+            throw "Full engine test failed with exit code $code"
+          }
+
       - name: Remove smoke-test reports from release folder
         shell: pwsh
         run: |
           Remove-Item publish\smoke-report.txt -ErrorAction SilentlyContinue
           Remove-Item publish\ui-smoke-report.txt -ErrorAction SilentlyContinue
+          Remove-Item publish\engine-smoke-report.txt -ErrorAction SilentlyContinue
 
       - name: Upload only after all tests pass
         uses: actions/upload-artifact@v4
